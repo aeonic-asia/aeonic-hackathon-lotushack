@@ -30,9 +30,9 @@ INSERT INTO parents (id, "familyId", name, email) VALUES
     ('b1000000-0000-0000-0000-000000000002', 'a1000000-0000-0000-0000-000000000001', 'Tom Smith', 'tom@example.com');
 
 -- Children
-INSERT INTO children (id, "familyId", name, coins) VALUES
-    ('c1000000-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000001', 'Emma', 45),
-    ('c1000000-0000-0000-0000-000000000002', 'a1000000-0000-0000-0000-000000000001', 'Liam', 20);
+INSERT INTO children (id, "familyId", name, coins, "childAge") VALUES
+    ('c1000000-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-000000000001', 'Emma', 45, 9),
+    ('c1000000-0000-0000-0000-000000000002', 'a1000000-0000-0000-0000-000000000001', 'Liam', 20, 6);
 
 -- Parent-child roles
 INSERT INTO parent_child_roles (id, "parentId", "childId", role) VALUES

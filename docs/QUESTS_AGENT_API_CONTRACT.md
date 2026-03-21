@@ -40,27 +40,21 @@ The agent accepts two request styles: **intent-based** (structured) and **prompt
 
 ### `generateQuests`
 
-Generate daily quest suggestions for a child. Returns structured JSON for parent approval — **no database writes**.
+Generate daily quest suggestions for **all children in a family**. The agent retrieves children, their ages, and preferences/interests from the database. Returns 5 structured quest suggestions distributed fairly across children — **no database writes**.
 
 **Request:**
 
 ```json
 {
   "intent": "generateQuests",
-  "familyId": "a1000000-0000-0000-0000-000000000001",
-  "childId": "c1000000-0000-0000-0000-000000000001",
-  "childAge": 9,
-  "focusAreas": ["learning", "exercise", "responsibility"]
+  "familyId": "a1000000-0000-0000-0000-000000000001"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `intent` | `string` | yes | Must be `"generateQuests"` |
-| `familyId` | `string (uuid)` | yes | Family ID — used to load household context |
-| `childId` | `string (uuid)` | yes | Child to generate quests for |
-| `childAge` | `number` | yes | Age of the child (affects difficulty/rewards) |
-| `focusAreas` | `string[]` | no | Subset of: `"learning"`, `"exercise"`, `"responsibility"`, `"habit"`. Defaults to `["learning", "exercise", "responsibility"]` |
+| `familyId` | `string (uuid)` | yes | Family ID — used to load all children and their context |
 
 **Response:**
 
@@ -69,6 +63,8 @@ Generate daily quest suggestions for a child. Returns structured JSON for parent
   "intent": "generateQuests",
   "suggestions": [
     {
+      "childId": "c1000000-0000-0000-0000-000000000001",
+      "childName": "Emma",
       "title": "Marine Life Explorer",
       "description": "Discover fascinating facts about five different marine creatures.",
       "category": "learning",
@@ -86,7 +82,9 @@ Generate daily quest suggestions for a child. Returns structured JSON for parent
 | Field | Type | Description |
 |-------|------|-------------|
 | `intent` | `string` | Echo of the request intent |
-| `suggestions` | `Quest[]` | Array of quest suggestions (one per focus area) |
+| `suggestions` | `Quest[]` | Array of 5 quest suggestions distributed across children |
+| `suggestions[].childId` | `string (uuid)` | Which child this quest is for |
+| `suggestions[].childName` | `string` | Child's name (for display convenience) |
 | `suggestions[].title` | `string` | Adventure-framed quest name |
 | `suggestions[].description` | `string` | One-sentence description |
 | `suggestions[].category` | `string` | One of: `"learning"`, `"exercise"`, `"responsibility"`, `"habit"` |

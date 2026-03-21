@@ -16,7 +16,7 @@ GET_PARENTS = """
 """
 
 GET_CHILDREN = """
-    SELECT id, name, coins, "familyId"
+    SELECT id, name, coins, "childAge", "familyId"
     FROM children
     WHERE "familyId" = %s;
 """

@@ -52,6 +52,7 @@ class FamilyContextService:
             children.append({
                 "id": child_id,
                 "name": child["name"],
+                "age": child.get("childAge"),
                 "coins": child["coins"],
                 "streak": _serialize(streak),
                 "preferences": [_serialize(p) for p in preferences],

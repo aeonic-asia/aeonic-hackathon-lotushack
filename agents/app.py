@@ -32,57 +32,67 @@ def _get_graph():
     return _graph
 
 
-def _fetch_child_context(child_id: str, today: str) -> str:
-    """Pre-fetch child context from DB for RAG injection into the prompt.
+def _fetch_family_context(family_id: str, today: str) -> str:
+    """Pre-fetch all children in a family from DB for RAG injection into the prompt.
 
-    This replaces tool-based context loading — the agent receives all data
-    upfront and only needs a single LLM call to generate quests.
+    Loads every child's profile, age, preferences, streaks, goals, and
+    existing quests so the LLM can generate suggestions for the whole family
+    in a single call.
     """
     from db.connection import execute_query
     from db import queries
-    from db.family_context import _serialize
 
-    parts = []
+    family_rows = execute_query(queries.GET_FAMILY, (family_id,))
+    if not family_rows:
+        return f"Family {family_id} not found in database."
 
-    child_rows = execute_query(queries.GET_CHILD_BY_ID, (child_id,))
-    if not child_rows:
-        return f"Child {child_id} not found in database."
+    family = family_rows[0]
+    children_rows = execute_query(queries.GET_CHILDREN, (family_id,))
+    if not children_rows:
+        return f"No children found for family {family_id}."
 
-    child = child_rows[0]
-    parts.append(f"**Child:** {child['name']} | Coins: {child['coins']} | Family: {child['family_name']}")
+    sections = [f"**Family:** {family['name']} (id: {family['id']})"]
+    sections.append(f"**Number of children:** {len(children_rows)}")
 
-    # Preferences
-    prefs = execute_query(queries.GET_CHILD_PREFERENCES, (child_id,))
-    if prefs:
-        pref_list = ", ".join(f"{p['category_name']} ({p['score']})" for p in prefs)
-        parts.append(f"**Preferences:** {pref_list}")
+    for child in children_rows:
+        child_id = str(child["id"])
+        age = child.get("childAge", "unknown")
+        parts = [f"\n### {child['name']} (age {age}, coins: {child['coins']}, id: {child_id})"]
 
-    # Streak
-    streaks = execute_query(queries.GET_CHILD_STREAKS, (child_id,))
-    if streaks:
-        s = streaks[0]
-        parts.append(f"**Streak:** current={s['currentStreak']}, longest={s['longestStreak']}")
+        # Preferences (hobbies/interests)
+        prefs = execute_query(queries.GET_CHILD_PREFERENCES, (child_id,))
+        if prefs:
+            pref_list = ", ".join(f"{p['category_name']} ({p['score']})" for p in prefs)
+            parts.append(f"**Preferences/Interests:** {pref_list}")
 
-    # Active goals
-    goals = execute_query(queries.GET_CHILD_GOALS, (child_id,))
-    if goals:
-        goal_list = ", ".join(f"{g['title']} (target: {g['target_coins']})" for g in goals)
-        parts.append(f"**Goals:** {goal_list}")
+        # Streak
+        streaks = execute_query(queries.GET_CHILD_STREAKS, (child_id,))
+        if streaks:
+            s = streaks[0]
+            parts.append(f"**Streak:** current={s['currentStreak']}, longest={s['longestStreak']}")
 
-    # Existing quests for today
-    existing = execute_query(queries.CHECK_QUEST_EXISTS, (child_id, today))
-    if existing:
-        parts.append(f"**Already has quest today:** Yes (quest_id: {existing[0]['id']})")
-    else:
-        parts.append("**Already has quest today:** No")
+        # Active goals
+        goals = execute_query(queries.GET_CHILD_GOALS, (child_id,))
+        if goals:
+            goal_list = ", ".join(f"{g['title']} (target: {g['target_coins']})" for g in goals)
+            parts.append(f"**Goals:** {goal_list}")
 
-    # Active (pending) quests
-    active = execute_query(queries.GET_ACTIVE_QUESTS, (child_id,))
-    if active:
-        quest_list = ", ".join(f"{q['title']} ({q['status']})" for q in active[:5])
-        parts.append(f"**Active quests:** {quest_list}")
+        # Existing quests for today
+        existing = execute_query(queries.CHECK_QUEST_EXISTS, (child_id, today))
+        if existing:
+            parts.append(f"**Already has quest today:** Yes (quest_id: {existing[0]['id']})")
+        else:
+            parts.append("**Already has quest today:** No")
 
-    return "\n".join(parts)
+        # Active (pending) quests
+        active = execute_query(queries.GET_ACTIVE_QUESTS, (child_id,))
+        if active:
+            quest_list = ", ".join(f"{q['title']} ({q['status']})" for q in active[:5])
+            parts.append(f"**Active quests:** {quest_list}")
+
+        sections.append("\n".join(parts))
+
+    return "\n\n".join(sections)
 
 
 def _build_task(payload: dict) -> str:
@@ -97,24 +107,22 @@ def _build_task(payload: dict) -> str:
 
     if intent == "generateQuests":
         from datetime import date
-        child_age = payload.get("childAge", 8)
-        focus_areas = payload.get("focusAreas", ["learning", "exercise", "responsibility"])
-        if isinstance(focus_areas, list):
-            focus_areas = ", ".join(focus_areas)
         today = date.today().isoformat()
 
-        # RAG pattern: pre-fetch DB context so the agent needs zero tool calls
-        child_context = _fetch_child_context(child_id, today)
+        # RAG pattern: pre-fetch all children in the family
+        family_context = _fetch_family_context(family_id, today)
 
         return (
             f"[INTENT:generateQuests] "
-            f"Generate daily quest suggestions for today ({today}) for a {child_age}-year-old child "
-            f"in family {family_id}. "
-            f"Focus areas: {focus_areas}.\n\n"
-            f"## Child Context (pre-loaded from database)\n"
-            f"{child_context}\n\n"
-            f"Using the context above, generate one quest per focus area that doesn't already "
-            f"have a quest for today. Return ONLY a JSON array of quest suggestions."
+            f"Generate exactly 5 daily quest suggestions for today ({today}) "
+            f"for the children in family {family_id}. "
+            f"Distribute quests as equally as possible across all children. "
+            f"Use each child's age, preferences/interests, and goals to personalise quests.\n\n"
+            f"## Family Context (pre-loaded from database)\n"
+            f"{family_context}\n\n"
+            f"Using the context above, generate 5 quest suggestions distributed fairly "
+            f"across all children. Each quest must include a \"childId\" field. "
+            f"Return ONLY a JSON array of quest suggestions."
         )
 
     if intent == "childWish":

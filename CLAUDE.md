@@ -111,10 +111,10 @@ PORT=8090 python app.py    # Default port is 8080 (AgentCore convention); overri
 ### Testing
 
 ```bash
-# Quest generation (returns suggestions, no DB writes)
+# Quest generation (returns 5 suggestions across all children, no DB writes)
 curl -X POST http://localhost:8090/invocations \
   -H "Content-Type: application/json" \
-  -d '{"intent":"generateQuests","familyId":"<uuid>","childId":"<uuid>","childAge":9,"focusAreas":["learning","exercise"]}'
+  -d '{"intent":"generateQuests","familyId":"<uuid>"}'
 ```
 
 ### Deploying to AWS AgentCore
