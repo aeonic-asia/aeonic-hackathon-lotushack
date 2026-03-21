@@ -9,7 +9,7 @@ load_dotenv(_env_path)
 
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "gpt-4o")
+OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "gpt-4o-mini")
 
 
 def get_model():
