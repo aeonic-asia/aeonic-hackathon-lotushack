@@ -32,3 +32,4 @@ build/
 _bmad
 _bmad-output
 .claude/skills/bmad-*
+.mcp.json
