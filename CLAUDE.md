@@ -160,12 +160,11 @@ AWS_PROFILE=aeonic-hackathon-lotushack agentcore invoke '{"prompt": "Hello"}'
 
 An IAM user `lena-agent-invoker` was created with long-lived access keys for the Next.js frontend to invoke AgentCore. These credentials are **scoped to `InvokeAgentRuntime` only** on the agent ARN.
 
-- **Access Key ID:** `***REMOVED***`
+- **Access Key ID:** Stored in Next.js `.env.local` (not committed to repo)
 - **Used in:** Next.js `.env.local` for the `/api/agent` route handler
 
 **Cleanup after hackathon:**
 ```bash
-AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-access-key --user-name lena-agent-invoker --access-key-id ***REMOVED***
 AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-user-policy --user-name lena-agent-invoker --policy-name InvokeAgentOnly
 AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-user --user-name lena-agent-invoker
 ```

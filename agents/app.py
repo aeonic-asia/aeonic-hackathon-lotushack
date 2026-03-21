@@ -114,8 +114,9 @@ def _fetch_moment_context(family_id: str, today: str) -> str:
     """Pre-fetch family context plus calendar, activities, and advisor messages for moment planning.
 
     Reuses _fetch_family_context for the base household data, then appends
-    calendar events (next 7 days), recent activities, and recent advisor
-    messages so the LLM can find open time windows and avoid repetition.
+    calendar events, recent activities, and recent advisor messages.
+    On weekdays the calendar horizon is today only (evening at home);
+    on weekends it spans the full weekend.
     """
     from db.connection import execute_query
     from db import queries
@@ -126,8 +127,20 @@ def _fetch_moment_context(family_id: str, today: str) -> str:
     # Reuse the base family context (children, preferences, streaks, goals)
     base_context = _fetch_family_context(family_id, today)
 
-    # Calendar events: today through next 7 days
-    horizon = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    today_date = date.fromisoformat(today)
+    is_weekend = today_date.weekday() >= 5  # 5=Saturday, 6=Sunday
+
+    # Calendar events: scope depends on weekday vs weekend
+    if is_weekend:
+        # Weekend: fetch through Sunday
+        days_until_sunday = 6 - today_date.weekday()  # 0 if Sunday, 1 if Saturday
+        horizon = (today_date + timedelta(days=days_until_sunday + 1)).isoformat()
+        cal_label = "this weekend"
+    else:
+        # Weekday: only today (evening at home)
+        horizon = (today_date + timedelta(days=1)).isoformat()
+        cal_label = f"today ({today}, evening only)"
+
     t0 = time.perf_counter()
     calendar_rows = execute_query(queries.GET_CALENDAR_EVENTS, (family_id, today, horizon))
     logger.info("[PERF] db_calendar_events=%.3fs", time.perf_counter() - t0)
@@ -139,9 +152,9 @@ def _fetch_moment_context(family_id: str, today: str) -> str:
                 f"- {ev['parent_name']}: {ev['title']} "
                 f"({ev['startTime']} to {ev['endTime']})"
             )
-        calendar_section = "## Parent Calendar (next 7 days)\n" + "\n".join(cal_lines)
+        calendar_section = f"## Parent Calendar ({cal_label})\n" + "\n".join(cal_lines)
     else:
-        calendar_section = "## Parent Calendar (next 7 days)\nNo scheduled events found."
+        calendar_section = f"## Parent Calendar ({cal_label})\nNo scheduled events found."
 
     # Recent activities
     t0 = time.perf_counter()
@@ -213,19 +226,40 @@ def _build_task(payload: dict) -> str:
 
     if intent == "planMoment":
         from datetime import date
-        today = date.today().isoformat()
+        today_date = date.today()
+        today = today_date.isoformat()
+        day_name = today_date.strftime("%A")  # e.g. "Friday"
+        is_weekend = today_date.weekday() >= 5  # 5=Saturday, 6=Sunday
 
         moment_context = _fetch_moment_context(family_id, today)
 
+        if is_weekend:
+            day_instruction = (
+                f"Today is {day_name} {today} (WEEKEND). "
+                f"Suggest 3 outside-the-home outing activities spread across "
+                f"Saturday and Sunday. Use flexible time windows throughout the day "
+                f"(morning, afternoon, or all-day), duration 60-120 minutes each. "
+                f"Every suggestion MUST have a non-empty mapsQuery."
+            )
+        else:
+            day_instruction = (
+                f"Today is {day_name} {today} (WEEKDAY). "
+                f"ALL 3 suggestions MUST be for TODAY {today}. "
+                f"Do NOT suggest activities for any other date. "
+                f"Suggestion 1: suggestedDay={today}. "
+                f"Suggestion 2: suggestedDay={today}. "
+                f"Suggestion 3: suggestedDay={today}. "
+                f"All must be AT-HOME evening activities (after 5 PM, 30-60 min). "
+                f"All must have mapsQuery=\"\"."
+            )
+
         return (
             f"[INTENT:planMoment] "
-            f"Suggest exactly 3 family activity moments for family {family_id} "
-            f"for the coming week (starting {today}). "
-            f"Use the children's preferences, find open time windows in the "
-            f"parent calendar, and avoid repeating recent activities.\n\n"
+            f"{day_instruction} "
+            f"Use the children's preferences and avoid repeating recent activities.\n\n"
             f"## Family Context (pre-loaded from database)\n"
             f"{moment_context}\n\n"
-            f"Using the context above, generate exactly 3 moment suggestions. "
+            f"Generate exactly 3 moment suggestions following the rules above. "
             f"Return ONLY a JSON object with a 'suggestions' array."
         )
 
