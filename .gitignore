@@ -22,3 +22,8 @@ Thumbs.db
 # Build
 dist/
 build/
+
+# bmad
+_bmad
+_bmad-output
+.claude/skills/bmad-*
