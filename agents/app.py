@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
@@ -20,16 +21,18 @@ logging.basicConfig(level=logging.INFO)
 app = BedrockAgentCoreApp()
 
 # Lazy-init: AgentCore requires startup within 30s, so we defer heavy imports
-# (Strands, OpenAI client, Graph creation) to the first invocation.
-_graph = None
+# (Strands, OpenAI client, Orchestrator creation) to the first invocation.
+_orchestrator = None
 
 
-def _get_graph():
-    global _graph
-    if _graph is None:
+def _get_orchestrator():
+    global _orchestrator
+    if _orchestrator is None:
+        t0 = time.perf_counter()
         from orchestrator.agent import create_orchestrator
-        _graph = create_orchestrator()
-    return _graph
+        _orchestrator = create_orchestrator()
+        logger.info("[PERF] orchestrator_init=%.2fs", time.perf_counter() - t0)
+    return _orchestrator
 
 
 def _fetch_family_context(family_id: str, today: str) -> str:
@@ -42,12 +45,18 @@ def _fetch_family_context(family_id: str, today: str) -> str:
     from db.connection import execute_query
     from db import queries
 
+    t_db_start = time.perf_counter()
+
+    t0 = time.perf_counter()
     family_rows = execute_query(queries.GET_FAMILY, (family_id,))
+    logger.info("[PERF] db_get_family=%.3fs", time.perf_counter() - t0)
     if not family_rows:
         return f"Family {family_id} not found in database."
 
     family = family_rows[0]
+    t0 = time.perf_counter()
     children_rows = execute_query(queries.GET_CHILDREN, (family_id,))
+    logger.info("[PERF] db_get_children=%.3fs", time.perf_counter() - t0)
     if not children_rows:
         return f"No children found for family {family_id}."
 
@@ -59,39 +68,45 @@ def _fetch_family_context(family_id: str, today: str) -> str:
         age = child.get("childAge", "unknown")
         parts = [f"\n### {child['name']} (age {age}, coins: {child['coins']}, id: {child_id})"]
 
-        # Preferences (hobbies/interests)
+        t0 = time.perf_counter()
         prefs = execute_query(queries.GET_CHILD_PREFERENCES, (child_id,))
+        logger.info("[PERF] db_preferences(%s)=%.3fs", child['name'], time.perf_counter() - t0)
         if prefs:
             pref_list = ", ".join(f"{p['category_name']} ({p['score']})" for p in prefs)
             parts.append(f"**Preferences/Interests:** {pref_list}")
 
-        # Streak
+        t0 = time.perf_counter()
         streaks = execute_query(queries.GET_CHILD_STREAKS, (child_id,))
+        logger.info("[PERF] db_streaks(%s)=%.3fs", child['name'], time.perf_counter() - t0)
         if streaks:
             s = streaks[0]
             parts.append(f"**Streak:** current={s['currentStreak']}, longest={s['longestStreak']}")
 
-        # Active goals
+        t0 = time.perf_counter()
         goals = execute_query(queries.GET_CHILD_GOALS, (child_id,))
+        logger.info("[PERF] db_goals(%s)=%.3fs", child['name'], time.perf_counter() - t0)
         if goals:
             goal_list = ", ".join(f"{g['title']} (target: {g['target_coins']})" for g in goals)
             parts.append(f"**Goals:** {goal_list}")
 
-        # Existing quests for today
+        t0 = time.perf_counter()
         existing = execute_query(queries.CHECK_QUEST_EXISTS, (child_id, today))
+        logger.info("[PERF] db_quest_exists(%s)=%.3fs", child['name'], time.perf_counter() - t0)
         if existing:
             parts.append(f"**Already has quest today:** Yes (quest_id: {existing[0]['id']})")
         else:
             parts.append("**Already has quest today:** No")
 
-        # Active (pending) quests
+        t0 = time.perf_counter()
         active = execute_query(queries.GET_ACTIVE_QUESTS, (child_id,))
+        logger.info("[PERF] db_active_quests(%s)=%.3fs", child['name'], time.perf_counter() - t0)
         if active:
             quest_list = ", ".join(f"{q['title']} ({q['status']})" for q in active[:5])
             parts.append(f"**Active quests:** {quest_list}")
 
         sections.append("\n".join(parts))
 
+    logger.info("[PERF] db_total=%.2fs (children=%d)", time.perf_counter() - t_db_start, len(children_rows))
     return "\n\n".join(sections)
 
 
@@ -199,32 +214,83 @@ def _extract_text_from_graph_result(graph_result, target_node: str) -> str:
     return str(result)
 
 
+def _extract_agent_text(result) -> str:
+    """Extract text from a direct Strands Agent call result."""
+    if hasattr(result, "message"):
+        message = result.message
+        if isinstance(message, dict):
+            content = message.get("content", [])
+            if content and isinstance(content, list):
+                return content[0].get("text", "")
+    return str(result)
+
+
 @app.entrypoint
 def invoke(payload):
-    """Main agent invocation handler — routes via Strands Graph."""
-    intent = payload.get("intent")
-    task = _build_task(payload)
+    """Main agent invocation handler.
 
-    logger.info("Invoking graph with intent=%s", intent)
-    graph_result = _get_graph()(task)
+    Structured intents (generateQuests, etc.) call agents directly — single
+    LLM call, no router overhead. Free-form prompts go through the graph
+    (router → coaching agent).
+    """
+    t_total = time.perf_counter()
+    intent = payload.get("intent")
+
+    t0 = time.perf_counter()
+    task = _build_task(payload)
+    logger.info("[PERF] build_task=%.2fs (intent=%s)", time.perf_counter() - t0, intent)
+
+    t0 = time.perf_counter()
+    orch = _get_orchestrator()
+    logger.info("[PERF] get_orchestrator=%.2fs", time.perf_counter() - t0)
+
+    # --- Direct agent calls for structured intents (skip router) ---
+
+    if intent == "generateQuests":
+        t0 = time.perf_counter()
+        result = orch.quest_agent(task)
+        logger.info("[PERF] quest_agent_llm=%.2fs", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        raw_text = _extract_agent_text(result)
+        # Structured output: model returns {"suggestions": [...]} directly
+        try:
+            parsed = json.loads(raw_text)
+            quests = parsed.get("suggestions", [])
+        except (json.JSONDecodeError, TypeError):
+            # Fallback to regex extraction if structured output somehow fails
+            quests = _extract_json_array(raw_text)
+        logger.info("[PERF] json_parse=%.3fs", time.perf_counter() - t0)
+        logger.info("[PERF] TOTAL=%.2fs (direct call, structured output)", time.perf_counter() - t_total)
+
+        if quests is not None:
+            return {"intent": intent, "suggestions": quests}
+        logger.warning("Failed to parse quest response")
+        logger.info("quest raw_text (first 300): %s", raw_text[:300])
+        return {"intent": intent, "suggestions": [], "debug_raw": raw_text[:500]}
+
+    if intent in ("childWish", "parentCoaching"):
+        t0 = time.perf_counter()
+        result = orch.coaching_agent(task)
+        logger.info("[PERF] coaching_agent_llm=%.2fs", time.perf_counter() - t0)
+        raw_text = _extract_agent_text(result)
+        logger.info("[PERF] TOTAL=%.2fs (direct call, no router)", time.perf_counter() - t_total)
+        return {"result": {"role": "assistant", "content": [{"text": raw_text}]}}
+
+    # --- Free-form prompts go through the graph (router → coaching) ---
+
+    t0 = time.perf_counter()
+    graph_result = orch.graph(task)
+    graph_elapsed = time.perf_counter() - t0
     logger.info(
-        "Graph completed: status=%s, nodes=%s",
+        "[PERF] graph_execution=%.2fs, status=%s, nodes=%s",
+        graph_elapsed,
         graph_result.status,
         [n.node_id for n in graph_result.execution_order],
     )
 
-    # For quest generation, extract structured JSON from the quest_generator node
-    if intent == "generateQuests":
-        raw_text = _extract_text_from_graph_result(graph_result, "quest_generator")
-        logger.info("quest raw_text (first 300): %s", raw_text[:300])
-        quests = _extract_json_array(raw_text)
-        if quests is not None:
-            return {"intent": intent, "suggestions": quests}
-        logger.warning("Failed to extract JSON array from quest response")
-        return {"intent": intent, "suggestions": [], "debug_raw": raw_text[:500]}
-
-    # For other intents, return the coaching agent's response
     raw_text = _extract_text_from_graph_result(graph_result, "coaching")
+    logger.info("[PERF] TOTAL=%.2fs (graph path)", time.perf_counter() - t_total)
     return {"result": {"role": "assistant", "content": [{"text": raw_text}]}}
 
 
