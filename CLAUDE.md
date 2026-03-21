@@ -156,6 +156,20 @@ AWS_PROFILE=aeonic-hackathon-lotushack agentcore invoke '{"prompt": "Hello"}'
 3. Register the `@tool` in `orchestrator/agent.py`'s `create_orchestrator()`
 4. No infrastructure changes — same single runtime, just redeploy
 
+## Hackathon Credentials (DELETE AFTER HACKATHON)
+
+An IAM user `lena-agent-invoker` was created with long-lived access keys for the Next.js frontend to invoke AgentCore. These credentials are **scoped to `InvokeAgentRuntime` only** on the agent ARN.
+
+- **Access Key ID:** `***REMOVED***`
+- **Used in:** Next.js `.env.local` for the `/api/agent` route handler
+
+**Cleanup after hackathon:**
+```bash
+AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-access-key --user-name lena-agent-invoker --access-key-id ***REMOVED***
+AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-user-policy --user-name lena-agent-invoker --policy-name InvokeAgentOnly
+AWS_PROFILE=aeonic-hackathon-lotushack aws iam delete-user --user-name lena-agent-invoker
+```
+
 ## Key Design Constraints
 
 - Quests must include parent guidance prompts (Socratic questions) — never reveal answers directly
