@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document explains how the current database structure supports AI-agent behavior in Lena's Homestead. It is based on the active schema in `src/migrations/2026-03-21-mvp-final-schema.sql` and the registered TypeORM entities under `src/**`.
+This document explains how the current database structure supports AI-agent behavior in Lena's Homestead. It is based on the **live Supabase Postgres schema** verified on 2026-03-21 and the registered TypeORM entities under `src/**`.
 
 The core design idea is simple:
 
@@ -14,23 +14,26 @@ The core design idea is simple:
 
 ## Current Active Schema
 
-The active database model contains 14 tables and 1 AI-facing view:
+The active database model contains **14 tables**. The `family_context_view` referenced in the architecture has **not yet been created** — see [Current-State Observations](#current-state-observations-from-the-schema) for details.
 
-1. `families`
-2. `parents`
-3. `children`
-4. `parent_child_roles`
-5. `goals`
-6. `quests`
-7. `quest_streaks`
-8. `preference_categories`
-9. `child_preferences`
-10. `activities`
-11. `advisor_messages`
-12. `calendar_events`
-13. `event_logs`
-14. `place_cache`
-15. `family_context_view`
+All tables use UUID primary keys (`gen_random_uuid()`), camelCase column names (TypeORM convention), and `ON DELETE CASCADE` foreign keys rooted at `families`.
+
+### Tables
+
+1. `families` — `id`, `name`, `createdAt`
+2. `parents` — `id`, `familyId` → families, `name`, `email`, `createdAt`
+3. `children` — `id`, `familyId` → families, `name`, `coins` (int, default 0), `createdAt`
+4. `parent_child_roles` — `id`, `parentId` → parents, `childId` → children, `role` (varchar), `createdAt`
+5. `goals` — `id`, `childId` → children, `title`, `target_coins` (int), `deadline` (nullable timestamp), `createdAt`
+6. `quests` — `id`, `childId` → children, `title`, `status` (default 'pending'), `reward` (int), `assignedDate` (date, nullable), `expiresAt` (nullable), `completedAt` (nullable), `createdAt`
+7. `quest_streaks` — `id`, `childId` → children, `currentStreak` (default 0), `longestStreak` (default 0), `lastCompletedDate` (date, nullable), `updatedAt`
+8. `preference_categories` — `id`, `name`, `description` (nullable), `createdAt`
+9. `child_preferences` — `id`, `childId` → children, `categoryId` → preference_categories, `score` (int, default 0), `updatedAt`
+10. `activities` — `id`, `familyId` → families, `childId` → children, `activity` (varchar), `locationName` (nullable), `mapsLink` (nullable), `completed` (bool, default false), `createdAt`
+11. `advisor_messages` — `id`, `familyId` → families, `parentId` → parents, `childId` → children, `message`, `status` (default 'pending'), `suggestedActivity` (nullable), `suggestedTime` (nullable timestamp), `mapsQuery` (nullable), `createdAt`
+12. `calendar_events` — `id`, `parentId` → parents, `familyId` → families, `title`, `startTime`, `endTime`, `createdAt`
+13. `event_logs` — `id`, `familyId` → families, `childId` → children, `eventType` (varchar), `metadata` (jsonb, nullable), `createdAt`
+14. `place_cache` — `id`, `query` (varchar), `placeName`, `rating` (float, nullable), `openNow` (bool, nullable), `mapsLink` (nullable), `createdAt`
 
 ## AI-Oriented Architecture
 
@@ -90,7 +93,9 @@ This separation makes agent reasoning easier:
 
 ### 4. Read-optimized context assembly
 
-`family_context_view` exists so the agent can fetch one family snapshot without reconstructing the household from many joins every time.
+`family_context_view` is designed so the agent can fetch one family snapshot without reconstructing the household from many joins every time.
+
+**Current approach:** The view does not exist yet. For now, agents assemble household context through direct queries against `families`, `parents`, `children`, `quest_streaks`, `child_preferences`, `quests`, and `activities`. This query logic must be **encapsulated behind a shared service or repository method** (e.g. `FamilyContextService.getSnapshot(familyId)`) so that when `family_context_view` is created later, the switch is a single implementation change — not a refactor across every agent.
 
 ## Table-by-Table Reasoning
 
@@ -417,43 +422,58 @@ Why this matters:
 
 | Agent | Primary Reads | Primary Writes | Notes |
 |---|---|---|---|
-| Orchestrator | `family_context_view` | none directly if possible | Should delegate specialized writes to domain agents/services |
-| Quest Generator | `family_context_view`, `goals`, `quests` | `quests`, `event_logs` | Must respect one quest per child per assigned date |
+| Orchestrator | `family_context_view` | none | Routes intents, returns structured JSON suggestions |
+| Quest Generator | `family_context_view`, `goals`, `quests`, `child_preferences` | none (read-only) | Returns quest suggestions for parent approval. Frontend persists approved quests. Must check for duplicates per child per assigned date |
 | Preference Learner | `activities`, `quests`, `advisor_messages`, `event_logs` | `child_preferences`, `event_logs` | Should update scores gradually, not with large jumps |
 | Moment Planner | `family_context_view`, `calendar_events`, `activities`, `place_cache` | `advisor_messages`, optionally `activities`, `event_logs` | Should avoid recommending overly repetitive moments |
 | Advisor Agent | `parents`, `children`, `advisor_messages` | `advisor_messages`, `event_logs` | Tracks suggestion lifecycle |
 | Place Discovery Agent | `place_cache` | `place_cache` | Should be reusable infrastructure for planners/advisors |
 
+> **Design decision (2026-03-21):** Agents are read-only suggestion engines. They do not write decisions to the database directly. The parent reviews and approves suggestions in the frontend, which then persists approved items via the NestJS API. This enforces the core principle: "Parents approve everything — AI suggests, humans confirm."
+
 ## Current-State Observations From The Schema
 
-These are not blockers for the document, but they matter when turning the design into production agent logic.
+Verified against the live Supabase Postgres database on 2026-03-21. These observations matter when turning the design into production agent logic.
 
-1. `quest_streaks` does not currently enforce a unique `child_id` at the database level.
-   This means application code should treat it as one logical streak record per child and guard against duplicates.
+1. **`family_context_view` does not exist yet.**
+   The architecture references it as the primary AI entry point, but the view has not been created in the database. Until it is created, agents must assemble household context by joining `families`, `parents`, `children`, `quest_streaks`, `child_preferences`, `quests`, and `activities` directly. This is the highest-priority schema gap.
 
-2. `activities` is family-scoped and child-linked, but each row points to one `child_id`.
+2. **No unique constraint on `quest_streaks.childId`.**
+   Application code should treat it as one logical streak record per child and guard against duplicates. A `UNIQUE (childId)` constraint is recommended.
+
+3. **No unique constraint on `child_preferences (childId, categoryId)`.**
+   Without this, duplicate preference rows for the same child+category pair can be inserted. A composite unique constraint is recommended.
+
+4. **No secondary indexes beyond primary keys.**
+   All FK columns (`familyId`, `childId`, `parentId`, `categoryId`) lack indexes. This is acceptable at hackathon scale but will degrade join and lookup performance at production volume. Priority indexes: `children.familyId`, `quests.childId`, `event_logs.familyId`, `event_logs.childId`.
+
+5. **`activities` is family-scoped and child-linked, but each row points to one `childId`.**
    If one activity truly involves multiple children, the current schema models that as multiple rows or as one primary child with family context.
 
-3. `advisor_messages` is both family-scoped and child-specific.
+6. **`advisor_messages` is both family-scoped and child-specific.**
    That is useful for personalized advice, but broader family-wide recommendations may need one row per target child or a later schema extension.
 
-4. `family_context_view` is a convenience read model, not a full memory model.
-   It summarizes top preferences, pending quests, and recent activities, but deep reasoning may still need direct reads from `goals`, `calendar_events`, `advisor_messages`, and `event_logs`.
+7. **`goals.target_coins` uses snake_case while all other columns use camelCase.**
+   This is a minor inconsistency — likely from manual SQL vs TypeORM generation. Agents writing SQL should use `target_coins` (not `targetCoins`) for this column.
 
-5. Empty legacy placeholders exist in `src/advisor/advisor.entity.ts` and `src/preferences/preference.entity.ts`.
-   They do not appear to be part of the active AI data model described by the migration and registered modules.
+8. **`quest_streaks.id` uses `uuid_generate_v4()` while all other tables use `gen_random_uuid()`.**
+   Functionally equivalent, but indicates `quest_streaks` may have been created via a different migration path. No action needed unless standardization is desired.
+
+9. **All foreign keys cascade on delete.**
+   Deleting a `families` row will cascade-delete all parents, children, quests, activities, advisor messages, calendar events, event logs, and preferences. This is correct for tenant cleanup but means accidental family deletion is destructive and unrecoverable.
 
 ## Recommended Operating Rule For The AI Layer
 
 Use this sequence for every AI feature:
 
-1. Read `family_context_view` for the fast household snapshot.
+1. Read `family_context_view` (or `FamilyContextService.get_snapshot()`) for the fast household snapshot.
 2. Read only the extra operational tables needed for the specific decision.
-3. Make a bounded decision tied to one family and one child or household event.
-4. Write the decision into a first-class table such as `quests`, `activities`, or `advisor_messages`.
-5. Append an `event_logs` record so the system keeps a trace of why the decision happened.
+3. Generate a bounded suggestion tied to one family and one child or household event.
+4. Return the suggestion as structured JSON to the frontend.
+5. The parent approves or rejects the suggestion in the frontend.
+6. The frontend persists approved items into first-class tables (`quests`, `activities`, `advisor_messages`) and appends an `event_logs` record.
 
-This pattern keeps the AI explainable, testable, and compatible with future analytics.
+This pattern keeps the AI explainable, testable, respects parental authority, and is compatible with future analytics.
 
 ## Summary
 

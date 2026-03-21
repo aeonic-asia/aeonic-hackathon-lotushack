@@ -1,0 +1,6 @@
+bedrock-agentcore
+strands-agents
+strands-agents-tools
+openai
+psycopg2-binary
+python-dotenv

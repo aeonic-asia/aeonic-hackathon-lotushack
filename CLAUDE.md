@@ -10,11 +10,14 @@ Core principle: "AI guides parents, never replaces them." The AI is a coaching e
 
 ## Architecture
 
-### Agent Hierarchy
+### Single-Runtime Agent Design
 
-The **Lena AI Steward** is the central orchestrator agent deployed on AWS AgentCore. It does NOT perform domain tasks itself — it recognizes intent, plans workflows, and calls sub-agents via `agentsAsToolsCall`:
+All agents run in a **single AWS AgentCore runtime** (`agents/app.py`). The **Lena AI Steward** is the orchestrator — it recognizes intent, loads family context, and delegates to sub-agents. Sub-agents are Strands `Agent` instances exposed as `@tool` functions that the orchestrator calls in-process (no cross-runtime networking).
 
-- **QuestGeneratorAgent** — generates daily quests across four pillars (Learning, Exercise, Responsibility, Life Habits) with Socratic parent guidance
+**Implemented agents:**
+- **QuestGeneratorAgent** — generates daily quest *suggestions* across four pillars (Learning, Exercise, Responsibility, Life Habits) with Socratic parent guidance. **Read-only** — returns JSON suggestions for parent approval; does NOT write to the database.
+
+**Planned agents (not yet implemented):**
 - **PreferenceAnalyzerAgent** — analyzes child behavioral history and preference scores, returns 2-3 ranked suggestions
 - **AdvisorAgent** — generates proactive parent notifications with actionable suggestions
 - **MomentPlannerAgent** — plans family activities, calculates goal pacing (seeds/day to meet deadline)
@@ -23,10 +26,12 @@ The **Lena AI Steward** is the central orchestrator agent deployed on AWS AgentC
 ### Data Flow
 
 ```
-Frontend (Next.js) → Lena AI Steward (orchestrator)
-    → Sub-agents (via agentsAsToolsCall)
-    → OpenAI API (LLM)
-    → Supabase Postgres (persistent memory)
+Frontend (Next.js) → POST /invocations → Lena AI Steward (orchestrator)
+    → Sub-agents (in-process @tool functions)
+    → OpenAI API (LLM via Strands OpenAIModel)
+    → Supabase Postgres (read-only context assembly)
+    → JSON suggestions returned to frontend
+    → Parent approves → Frontend writes to Supabase
 ```
 
 ### Database Design (Supabase Postgres)
@@ -36,34 +41,88 @@ The database is organized around `family_id` as the tenant boundary:
 - **Motivation/action:** goals, quests, quest_streaks
 - **Personalization:** preference_categories, child_preferences
 - **Planning/recommendation:** activities, calendar_events, advisor_messages, place_cache
-- **Memory/audit:** event_logs, family_context_view (read-only AI context layer)
+- **Memory/audit:** event_logs
+- **AI context layer (planned):** family_context_view (read-only view — not yet created)
 
-`family_context_view` is the primary AI entry point — agents read this first for a compact household snapshot, then do targeted reads from specific tables as needed.
+`family_context_view` is planned as the primary AI entry point. Until created, agents assemble household context via direct queries, encapsulated behind a shared service method (e.g. `FamilyContextService.getSnapshot(familyId)`) so the view can be swapped in later without refactoring agents.
 
 ### Agent Operating Rule
 
-Every AI feature follows this sequence:
-1. Read `family_context_view` for the household snapshot
+Agents are **read-only suggestion engines**. They do not write to the database directly. The flow is:
+1. Read family context via `FamilyContextService.get_snapshot(family_id)` (encapsulates the planned `family_context_view`)
 2. Read only the extra tables needed for the specific decision
-3. Make a bounded decision tied to one family + one child/event
-4. Write the decision into a first-class table (quests, activities, advisor_messages)
-5. Append an `event_logs` record for traceability
+3. Generate a bounded suggestion tied to one family + one child/event
+4. Return structured JSON suggestions to the frontend
+5. Parent approves/rejects in the frontend; only approved items are persisted by the NestJS API
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
-| AI Orchestrator | AWS AgentCore (Lena AI Steward) |
-| LLM | OpenAI API (via API key) |
-| Sub-Agent Communication | AgentCore `agentsAsToolsCall` |
-| Database | Supabase Postgres |
+| AI Orchestrator | AWS AgentCore (single runtime, Lena AI Steward) |
+| Agent Framework | Strands Agents (`strands-agents` Python SDK) |
+| LLM | OpenAI API (`gpt-4o` via `strands.models.openai.OpenAIModel`) |
+| Sub-Agent Communication | In-process `@tool` functions (not cross-runtime) |
+| Database | Supabase Postgres (`psycopg2` from Python agents) |
 | Voice | ElevenLabs API |
 | Location | Google Places API |
 | AWS Account | `aeonic-hackathon-lotushack` |
 
-## MCP Server
+## MCP Servers
 
-The `bedrock-agentcore-mcp-server` is configured in `.mcp.json` for interacting with AWS AgentCore services (agent runtime, memory, gateway, docs).
+Two MCP servers are configured in `.mcp.json`:
+
+- **`bedrock-agentcore-mcp-server`** — interacts with AWS AgentCore services (agent runtime, memory, gateway, docs)
+- **`postgres`** (`@modelcontextprotocol/server-postgres`) — **read-only** access to the Supabase Postgres database. Use `mcp__postgres__query` with SQL to explore schemas, inspect data, and debug during development. Connection string is in `.mcp.json`. All columns use camelCase (TypeORM convention) — quote identifiers in raw SQL (e.g. `"childId"`).
+
+## Agent Implementation
+
+### Project Structure
+
+```
+agents/
+  app.py                    # BedrockAgentCoreApp entrypoint (single runtime)
+  config.py                 # OpenAI model factory, env config
+  requirements.txt          # Python dependencies (needs Python 3.10+)
+  db/
+    connection.py            # psycopg2 connection pool to Supabase
+    queries.py               # Parameterized SQL (camelCase-quoted)
+    family_context.py        # FamilyContextService — key abstraction for household context
+  tools/
+    db_tools.py              # @tool wrappers for DB operations
+  sub_agents/
+    quest_generator.py       # QuestGeneratorAgent + @tool wrapper
+  orchestrator/
+    agent.py                 # Orchestrator Agent assembly
+    prompts.py               # System prompts for all agents
+  tests/
+    seed_data.sql            # DB migration + seed data
+```
+
+### Running Locally
+
+```bash
+cd agents/
+python3.10 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python app.py              # Serves on PORT (default 8090)
+```
+
+### Testing
+
+```bash
+# Quest generation (returns suggestions, no DB writes)
+curl -X POST http://localhost:8090/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"intent":"generateQuests","familyId":"<uuid>","childId":"<uuid>","childAge":9,"focusAreas":["learning","exercise"]}'
+```
+
+### Adding a New Sub-Agent
+
+1. Create `agents/sub_agents/<name>.py` with a Strands `Agent` + `@tool` wrapper
+2. Add the system prompt to `agents/orchestrator/prompts.py`
+3. Register the `@tool` in `orchestrator/agent.py`'s `create_orchestrator()`
+4. No infrastructure changes — same single runtime
 
 ## Key Design Constraints
 
