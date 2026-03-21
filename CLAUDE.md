@@ -63,7 +63,7 @@ Agents are **read-only suggestion engines**. They do not write to the database d
 | Agent Framework | Strands Agents (`strands-agents` Python SDK) |
 | LLM | OpenAI API (`gpt-4o` via `strands.models.openai.OpenAIModel`) |
 | Sub-Agent Communication | In-process `@tool` functions (not cross-runtime) |
-| Database | Supabase Postgres (`psycopg2` from Python agents) |
+| Database | Supabase Postgres (`pg8000` pure-Python driver from agents) |
 | Voice | ElevenLabs API |
 | Location | Google Places API |
 | AWS Account | `aeonic-hackathon-lotushack` |
@@ -85,7 +85,7 @@ agents/
   config.py                 # OpenAI model factory, env config
   requirements.txt          # Python dependencies (needs Python 3.10+)
   db/
-    connection.py            # psycopg2 connection pool to Supabase
+    connection.py            # pg8000 DB connection to Supabase (pure Python, no C extensions)
     queries.py               # Parameterized SQL (camelCase-quoted)
     family_context.py        # FamilyContextService — key abstraction for household context
   tools/
@@ -105,7 +105,7 @@ agents/
 cd agents/
 python3.10 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python app.py              # Serves on PORT (default 8090)
+PORT=8090 python app.py    # Default port is 8080 (AgentCore convention); override for local dev
 ```
 
 ### Testing
@@ -117,12 +117,44 @@ curl -X POST http://localhost:8090/invocations \
   -d '{"intent":"generateQuests","familyId":"<uuid>","childId":"<uuid>","childAge":9,"focusAreas":["learning","exercise"]}'
 ```
 
+### Deploying to AWS AgentCore
+
+Prerequisites: AWS SSO login and `bedrock-agentcore-starter-toolkit` installed.
+
+```bash
+# 1. Login to AWS
+aws sso login --profile aeonic-hackathon-lotushack
+
+# 2. Install deployment CLI (once)
+pip install bedrock-agentcore-starter-toolkit
+
+# 3. Configure the agent (once, or after structural changes)
+cd agents/
+AWS_PROFILE=aeonic-hackathon-lotushack agentcore configure --entrypoint app.py --non-interactive --disable-memory
+
+# 4. Deploy with environment variables
+AWS_PROFILE=aeonic-hackathon-lotushack agentcore deploy \
+  --env "OPENAI_API_KEY=<key>" \
+  --env "SUPABASE_DB_URL=<connection-string>"
+
+# 5. Verify deployment
+AWS_PROFILE=aeonic-hackathon-lotushack agentcore status
+AWS_PROFILE=aeonic-hackathon-lotushack agentcore invoke '{"prompt": "Hello"}'
+```
+
+**Deployment gotchas:**
+- **Port must be 8080** — AgentCore health check expects this. Use `PORT` env var only for local dev.
+- **No C extensions** — use `pg8000` (pure Python) instead of `psycopg2-binary`. Cross-compilation for ARM64 is unreliable.
+- **Lazy-init heavy imports** — orchestrator/strands/OpenAI are imported on first invocation, not at module level. AgentCore's container init timeout is 30s.
+- **Package size matters** — keep `requirements.txt` lean. Don't include `strands-agents-tools` unless actually used.
+- **`--disable-memory`** — we use Supabase for persistence, not AgentCore's built-in memory service.
+
 ### Adding a New Sub-Agent
 
 1. Create `agents/sub_agents/<name>.py` with a Strands `Agent` + `@tool` wrapper
 2. Add the system prompt to `agents/orchestrator/prompts.py`
 3. Register the `@tool` in `orchestrator/agent.py`'s `create_orchestrator()`
-4. No infrastructure changes — same single runtime
+4. No infrastructure changes — same single runtime, just redeploy
 
 ## Key Design Constraints
 
