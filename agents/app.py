@@ -11,10 +11,19 @@ import re
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-from orchestrator.agent import create_orchestrator
-
 app = BedrockAgentCoreApp()
-orchestrator = create_orchestrator()
+
+# Lazy-init: AgentCore requires startup within 30s, so we defer heavy imports
+# (Strands, OpenAI client, Agent creation) to the first invocation.
+_orchestrator = None
+
+
+def _get_orchestrator():
+    global _orchestrator
+    if _orchestrator is None:
+        from orchestrator.agent import create_orchestrator
+        _orchestrator = create_orchestrator()
+    return _orchestrator
 
 
 def build_prompt_from_intent(payload: dict) -> str:
@@ -83,7 +92,7 @@ def invoke(payload):
     else:
         prompt = payload.get("prompt", "Hello! I'm here to help with your homestead.")
 
-    result = orchestrator(prompt)
+    result = _get_orchestrator()(prompt)
 
     # For structured intents, extract clean JSON from the LLM response
     if intent == "generateQuests":
@@ -96,5 +105,6 @@ def invoke(payload):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8090))
+    # AgentCore expects port 8080 (default). Override with PORT env var for local dev only.
+    port = int(os.environ.get("PORT", 8080))
     app.run(port=port)

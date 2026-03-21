@@ -1,6 +1,5 @@
 bedrock-agentcore
 strands-agents
-strands-agents-tools
 openai
-psycopg2-binary
+pg8000
 python-dotenv
