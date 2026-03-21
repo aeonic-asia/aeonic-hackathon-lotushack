@@ -11,11 +11,12 @@ the router acknowledges and the coaching agent handles the request.
 from strands import Agent
 from strands.multiagent.graph import GraphBuilder, Graph
 
-from config import get_model, get_quest_model
+from config import get_model, get_quest_model, get_moment_model
 from orchestrator.prompts import (
     ROUTER_PROMPT,
     QUEST_GENERATOR_PROMPT,
     COACHING_PROMPT,
+    MOMENT_PLANNER_PROMPT,
 )
 from tools.db_tools import get_family_context
 
@@ -32,6 +33,14 @@ class Orchestrator:
             system_prompt=QUEST_GENERATOR_PROMPT,
             tools=[],
             name="quest_generator",
+        )
+
+        # Moment planner uses structured output model (guaranteed JSON schema)
+        self.moment_agent = Agent(
+            model=get_moment_model(),
+            system_prompt=MOMENT_PLANNER_PROMPT,
+            tools=[],
+            name="moment_planner",
         )
 
         self.coaching_agent = Agent(

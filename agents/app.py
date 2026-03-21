@@ -110,6 +110,77 @@ def _fetch_family_context(family_id: str, today: str) -> str:
     return "\n\n".join(sections)
 
 
+def _fetch_moment_context(family_id: str, today: str) -> str:
+    """Pre-fetch family context plus calendar, activities, and advisor messages for moment planning.
+
+    Reuses _fetch_family_context for the base household data, then appends
+    calendar events (next 7 days), recent activities, and recent advisor
+    messages so the LLM can find open time windows and avoid repetition.
+    """
+    from db.connection import execute_query
+    from db import queries
+    from datetime import date, timedelta
+
+    t_db_start = time.perf_counter()
+
+    # Reuse the base family context (children, preferences, streaks, goals)
+    base_context = _fetch_family_context(family_id, today)
+
+    # Calendar events: today through next 7 days
+    horizon = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    t0 = time.perf_counter()
+    calendar_rows = execute_query(queries.GET_CALENDAR_EVENTS, (family_id, today, horizon))
+    logger.info("[PERF] db_calendar_events=%.3fs", time.perf_counter() - t0)
+
+    if calendar_rows:
+        cal_lines = []
+        for ev in calendar_rows:
+            cal_lines.append(
+                f"- {ev['parent_name']}: {ev['title']} "
+                f"({ev['startTime']} to {ev['endTime']})"
+            )
+        calendar_section = "## Parent Calendar (next 7 days)\n" + "\n".join(cal_lines)
+    else:
+        calendar_section = "## Parent Calendar (next 7 days)\nNo scheduled events found."
+
+    # Recent activities
+    t0 = time.perf_counter()
+    activity_rows = execute_query(queries.GET_RECENT_ACTIVITIES, (family_id,))
+    logger.info("[PERF] db_recent_activities=%.3fs", time.perf_counter() - t0)
+
+    if activity_rows:
+        act_lines = []
+        for a in activity_rows:
+            status = "completed" if a.get("completed") else "not completed"
+            act_lines.append(
+                f"- {a['activity']} (child: {a['child_name']}, "
+                f"{status}, {a['createdAt']})"
+            )
+        activities_section = "## Recent Activities\n" + "\n".join(act_lines)
+    else:
+        activities_section = "## Recent Activities\nNo recent activities found."
+
+    # Recent advisor messages
+    t0 = time.perf_counter()
+    advisor_rows = execute_query(queries.GET_RECENT_ADVISOR_MESSAGES, (family_id,))
+    logger.info("[PERF] db_recent_advisor=%.3fs", time.perf_counter() - t0)
+
+    if advisor_rows:
+        adv_lines = []
+        for m in advisor_rows:
+            adv_lines.append(
+                f"- {m.get('suggestedActivity', 'N/A')} "
+                f"(child: {m['child_name']}, status: {m['status']}, {m['createdAt']})"
+            )
+        advisor_section = "## Recent Suggestions\n" + "\n".join(adv_lines)
+    else:
+        advisor_section = "## Recent Suggestions\nNo recent suggestions found."
+
+    logger.info("[PERF] db_moment_total=%.2fs", time.perf_counter() - t_db_start)
+
+    return f"{base_context}\n\n{calendar_section}\n\n{activities_section}\n\n{advisor_section}"
+
+
 def _build_task(payload: dict) -> str:
     """Build a task string with an embedded intent tag for graph routing.
 
@@ -138,6 +209,24 @@ def _build_task(payload: dict) -> str:
             f"Using the context above, generate 5 quest suggestions distributed fairly "
             f"across all children. Each quest must include a \"childId\" field. "
             f"Return ONLY a JSON array of quest suggestions."
+        )
+
+    if intent == "planMoment":
+        from datetime import date
+        today = date.today().isoformat()
+
+        moment_context = _fetch_moment_context(family_id, today)
+
+        return (
+            f"[INTENT:planMoment] "
+            f"Suggest exactly 3 family activity moments for family {family_id} "
+            f"for the coming week (starting {today}). "
+            f"Use the children's preferences, find open time windows in the "
+            f"parent calendar, and avoid repeating recent activities.\n\n"
+            f"## Family Context (pre-loaded from database)\n"
+            f"{moment_context}\n\n"
+            f"Using the context above, generate exactly 3 moment suggestions. "
+            f"Return ONLY a JSON object with a 'suggestions' array."
         )
 
     if intent == "childWish":
@@ -267,6 +356,28 @@ def invoke(payload):
             return {"intent": intent, "suggestions": quests}
         logger.warning("Failed to parse quest response")
         logger.info("quest raw_text (first 300): %s", raw_text[:300])
+        return {"intent": intent, "suggestions": [], "debug_raw": raw_text[:500]}
+
+    if intent == "planMoment":
+        t0 = time.perf_counter()
+        result = orch.moment_agent(task)
+        logger.info("[PERF] moment_agent_llm=%.2fs", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        raw_text = _extract_agent_text(result)
+        # Structured output: model returns {"suggestions": [...]} directly
+        try:
+            parsed = json.loads(raw_text)
+            moments = parsed.get("suggestions", [])
+        except (json.JSONDecodeError, TypeError):
+            moments = _extract_json_array(raw_text)
+        logger.info("[PERF] json_parse=%.3fs", time.perf_counter() - t0)
+        logger.info("[PERF] TOTAL=%.2fs (direct call, structured output)", time.perf_counter() - t_total)
+
+        if moments is not None:
+            return {"intent": intent, "suggestions": moments}
+        logger.warning("Failed to parse moment response")
+        logger.info("moment raw_text (first 300): %s", raw_text[:300])
         return {"intent": intent, "suggestions": [], "debug_raw": raw_text[:500]}
 
     if intent in ("childWish", "parentCoaching"):

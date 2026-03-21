@@ -79,3 +79,38 @@ INSERT_EVENT_LOG = """
     ) VALUES (%s, %s, %s, %s::jsonb)
     RETURNING id;
 """
+
+# --- Moment planner queries ---
+
+GET_CALENDAR_EVENTS = """
+    SELECT ce.id, ce.title, ce."startTime", ce."endTime",
+           p.name AS parent_name, p.id AS "parentId"
+    FROM calendar_events ce
+    JOIN parents p ON p.id = ce."parentId"
+    WHERE ce."familyId" = %s
+      AND ce."endTime" >= %s
+      AND ce."startTime" <= %s
+    ORDER BY ce."startTime" ASC;
+"""
+
+GET_RECENT_ACTIVITIES = """
+    SELECT a.id, a.activity, a."locationName", a."mapsLink",
+           a.completed, a."createdAt",
+           c.name AS child_name, c.id AS "childId"
+    FROM activities a
+    JOIN children c ON c.id = a."childId"
+    WHERE a."familyId" = %s
+    ORDER BY a."createdAt" DESC
+    LIMIT 20;
+"""
+
+GET_RECENT_ADVISOR_MESSAGES = """
+    SELECT am.id, am.message, am."suggestedActivity", am."suggestedTime",
+           am."mapsQuery", am.status, am."createdAt",
+           c.name AS child_name
+    FROM advisor_messages am
+    JOIN children c ON c.id = am."childId"
+    WHERE am."familyId" = %s
+    ORDER BY am."createdAt" DESC
+    LIMIT 10;
+"""
