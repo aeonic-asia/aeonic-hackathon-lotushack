@@ -9,7 +9,7 @@ load_dotenv(_env_path)
 
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "gpt-4o-mini")
+OPENAI_MODEL_ID = os.environ.get("OPENAI_MODEL_ID", "gpt-5.3-chat-latest")
 
 
 def get_model():
@@ -20,8 +20,8 @@ def get_model():
         client_args={"api_key": OPENAI_API_KEY},
         model_id=OPENAI_MODEL_ID,
         params={
-            "max_tokens": 2000,
-            "temperature": 0.7,
+            "max_completion_tokens": 2000,
+            "temperature": 1,
         },
     )
 
@@ -93,8 +93,8 @@ def get_quest_model():
         client_args={"api_key": OPENAI_API_KEY},
         model_id=OPENAI_MODEL_ID,
         params={
-            "max_tokens": 2000,
-            "temperature": 0.7,
+            "max_completion_tokens": 2000,
+            "temperature": 1,
             "response_format": QUEST_SCHEMA,
         },
     )
@@ -158,8 +158,8 @@ def get_moment_model():
         client_args={"api_key": OPENAI_API_KEY},
         model_id=OPENAI_MODEL_ID,
         params={
-            "max_tokens": 2000,
-            "temperature": 0.7,
+            "max_completion_tokens": 2000,
+            "temperature": 1,
             "response_format": MOMENT_SCHEMA,
         },
     )
